@@ -4,6 +4,7 @@ import (
 	"net/http/httptest"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -54,5 +55,42 @@ func TestIndexHTMLNoInlineScript(t *testing.T) {
 			t.Fatalf("index.html contains inline <script> (blocked by CSP): %s", tag)
 		}
 		rest = rest[end:]
+	}
+}
+
+// TestIndexHTMLCSSVarsDefined index.html 中所有 var(--x) 引用的自定义属性
+// 必须在 :root 或 [data-theme="light"] 里有定义。
+//
+// 为什么需要：曾出现 .keycard 用 var(--bg-2, #fff) —— --bg-2 从未定义，
+// 于是夜间模式下该卡片回退到硬编码白色，与深色主题割裂（用户报的 bug）。
+// 这类笔误 Go / JS 测试都发现不了，只能靠静态校验兜住。
+func TestIndexHTMLCSSVarsDefined(t *testing.T) {
+	p := newTestPanel()
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, httptest.NewRequest("GET", "/panel/", nil))
+	body := rec.Body.String()
+
+	// 1) 收集定义：`--name:` 形式
+	defined := map[string]bool{}
+	for _, m := range regexp.MustCompile(`(--[a-zA-Z0-9_-]+)\s*:`).FindAllStringSubmatch(body, -1) {
+		defined[m[1]] = true
+	}
+	// 2) 收集引用：`var(--name` 形式
+	refRe := regexp.MustCompile(`var\(\s*(--[a-zA-Z0-9_-]+)`)
+	var missing []string
+	seen := map[string]bool{}
+	for _, m := range refRe.FindAllStringSubmatch(body, -1) {
+		name := m[1]
+		if seen[name] {
+			continue
+		}
+		seen[name] = true
+		if !defined[name] {
+			missing = append(missing, name)
+		}
+	}
+	if len(missing) > 0 {
+		t.Fatalf("index.html 引用了未定义的 CSS 变量（夜间模式会回退到硬编码颜色）: %s",
+			strings.Join(missing, ", "))
 	}
 }

@@ -668,6 +668,22 @@ docker exec -it workbuddy2api /app/wb2api setpassword admin
 
 > 裸名（不带前缀）默认按 `cn:` 处理。
 
+> ### ⚠️ 必须带前缀——否则会调用错账号池
+>
+> **手动添加模型名时，`global:` 前缀不能省。** 裸名会被当作**国内版**：
+>
+> | 你填的 | 实际解析 | 调用走 |
+> |---|---|---|
+> | `global:deepseek-v4.1-flash` | `global:deepseek-v4.1-flash` | ✅ 国际账号池 |
+> | `deepseek-v4.1-flash` | `cn:deepseek-v4.1-flash` | ❌ 国内账号池 |
+> | `cn:deepseek-v4.1-flash` | `cn:deepseek-v4.1-flash` | ❌ 国内账号池 |
+>
+> **白名单是「带前缀精确匹配」**：白名单写了 `global:deepseek-v4.1-flash`，
+> 客户端却用 `deepseek-v4.1-flash` 请求 → **403**。三处必须一致：
+> **白名单填写 = `/v1/models` 返回值 = 客户端请求的 model**。
+>
+> **最保险的做法**：用面板「⚡ 加载所有账号模型」勾选，前缀会自动补全，不用手敲。
+
 **面板操作**
 
 - **一键加载所有账号模型**：汇总**全部账号**（含多个 cn / global 账号）的模型目录，
