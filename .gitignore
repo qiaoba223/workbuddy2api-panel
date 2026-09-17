@@ -16,6 +16,13 @@ data/
 # Config with secrets (use config.example.json)
 config.json
 
+# update.sh 的运行日志（可能含路径/凭据线索，不进版本库）
+.update.log
+
+# 手工备份残留（如 config.json.bak.20250101）
+*.bak
+*.bak.*
+
 # Build artifacts
 *.tmp
 __pycache__/

@@ -24,6 +24,10 @@ BRANCH="${BRANCH:-main}"
 LOG_FILE="${REPO_DIR}/.update.log"
 REQUIRED_UID="${REQUIRED_UID:-10001}"   # config.json 需要的属主
 
+# GitHub 加速前缀：国内直连 github.com 极不稳定（TLS 常被中断）。
+# 直连失败时自动改用此代理重试；置空则禁用 fallback。
+GH_PROXY="${GH_PROXY:-https://gh-proxy.com/}"
+
 # ---------- 颜色 ----------
 if [ -t 1 ]; then
   R=$'\033[31m'; G=$'\033[32m'; Y=$'\033[33m'; B=$'\033[36m'; N=$'\033[0m'
@@ -45,6 +49,35 @@ run() {
 }
 
 cd "$REPO_DIR" 2>/dev/null || die "目录不存在: $REPO_DIR"
+
+# 带代理回退的 git fetch：
+#   1) 先用当前 remote（通常是直连 github.com）试一次
+#   2) 失败且配置了 GH_PROXY → 临时改用 <GH_PROXY><原始github URL> 重试
+#   3) 仍失败 → 报错并给出排查提示
+# 不修改 remote 配置，代理仅在本次 fetch 生效。
+git_fetch_with_fallback() {
+  local gh_url proxy_url
+  echo ">>> fetch origin/$BRANCH (直连)" >> "$LOG_FILE"
+  if git fetch origin "$BRANCH" --depth=1 2>&1 | tee -a "$LOG_FILE"; then
+    return 0
+  fi
+  # 直连失败：拿原始 GitHub URL（剥掉可能已有的代理前缀）
+  gh_url="$(git remote get-url origin)"
+  gh_url="${gh_url#https://gh-proxy.com/}"
+  gh_url="${gh_url#https://ghproxy.net/}"
+  gh_url="${gh_url#https://gh.llkk.cc/}"
+  if [ -z "$GH_PROXY" ]; then
+    return 1
+  fi
+  proxy_url="${GH_PROXY}${gh_url}"
+  warn "直连 github.com 失败（国内网络常见），改用加速代理重试…"
+  warn "  代理: $proxy_url"
+  echo ">>> fetch (经代理 $GH_PROXY)" >> "$LOG_FILE"
+  if git fetch "$proxy_url" "${BRANCH}:refs/remotes/origin/${BRANCH}" --depth=1 2>&1 | tee -a "$LOG_FILE"; then
+    return 0
+  fi
+  return 1
+}
 
 # ---------- 子命令：logs ----------
 if [ "${1:-}" = "logs" ]; then
@@ -125,8 +158,8 @@ if [ "$ROLLBACK" -eq 1 ]; then
   run "回退到 HEAD~1" git reset --hard HEAD~1 || die "回退失败"
 else
   info "步骤 1/4: 拉取代码"
-  run "fetch origin/$BRANCH" git fetch origin "$BRANCH" --depth=1 \
-    || die "git fetch 失败：请检查服务器能否访问 github.com（网络/代理）"
+  git_fetch_with_fallback \
+    || die "git fetch 失败：直连与代理（${GH_PROXY:-已禁用}）均不可用，请检查网络"
   run "reset --hard origin/$BRANCH" git reset --hard "origin/${BRANCH}" \
     || die "reset 失败"
 fi

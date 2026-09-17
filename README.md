@@ -803,6 +803,40 @@ docker exec -it workbuddy2api /app/wb2api setpassword admin
 
 账号 / 数据通过 `docker-compose.yml` 卷挂载持久化：`./auths`、`./data`、`./config.json`。
 
+### 更新部署（`update.sh`）
+
+拉代码 + 重建 + 重启一条龙，全过程记进 `.update.log`（SSH 断了也能查）：
+
+```bash
+cd /opt/workbuddy2api
+./update.sh           # 交互确认后更新
+./update.sh -y        # 跳过确认（脚本/无人值守调用）
+./update.sh status    # 看版本 / 容器 / 健康状态
+./update.sh logs      # 看上次更新的完整日志
+./update.sh rollback  # 回退到上一个提交并重建
+```
+
+> ⚠️ **别再手动 `scp` 覆盖文件**——本地会与 git 仓库冲突。改代码走：本地改 → 推 GitHub → 服务器 `./update.sh`。
+
+#### 国内服务器需给 git 配 GitHub 代理
+
+国内直连 `github.com` 极不稳定（实测 3 次全部 TLS 超时；偶发能通也不可靠），
+`git fetch` 会报 `GnuTLS recv error (-110): The TLS connection was non-properly terminated`。
+把 remote 换成加速代理即可（`gh-proxy.com` 完整支持 git 协议，实测 0.5s）：
+
+```bash
+cd /opt/workbuddy2api
+git remote set-url origin \
+  "https://gh-proxy.com/https://github.com/qiaoba223/workbuddy2api-panel.git"
+```
+
+`gh-proxy.com` 不可用时，同类加速前缀还有 `https://ghproxy.net/`、`https://gh.llkk.cc/` 等
+（用法相同，拼在完整 GitHub URL 前面）。若服务器已有本地代理（clash 等），
+也可改用 `git config --global http.https://github.com.proxy http://127.0.0.1:7890`。
+
+> Docker **构建**同样需要外网，Dockerfile 已内置 `GOPROXY=https://goproxy.cn,direct`
+> 与 apk 阿里云源，无需额外配置。
+
 ### 工具脚本
 
 | 脚本 | 用途 |
