@@ -56,10 +56,18 @@ cd "$REPO_DIR" 2>/dev/null || die "目录不存在: $REPO_DIR"
 #   3) 仍失败 → 报错并给出排查提示
 # 不修改 remote 配置，代理仅在本次 fetch 生效。
 git_fetch_with_fallback() {
-  local gh_url proxy_url
+  local gh_url proxy_url rc
   echo ">>> fetch origin/$BRANCH (直连)" >> "$LOG_FILE"
-  if git fetch origin "$BRANCH" --depth=1 2>&1 | tee -a "$LOG_FILE"; then
+  # 关键：直连必须加 timeout。国内网络下 github.com 常常"挂着不返回"
+  # （TCP 已连但 TLS/HTTP2 卡死），没有 timeout 就永远等不到 fallback。
+  # 用 + 强制覆盖跟踪分支，避免浅克隆历史导致的 non-fast-forward。
+  timeout 25 git fetch origin "+${BRANCH}:refs/remotes/origin/${BRANCH}" --depth=1 2>&1 | tee -a "$LOG_FILE"
+  rc=${PIPESTATUS[0]}
+  if [ "$rc" -eq 0 ]; then
     return 0
+  fi
+  if [ "$rc" -eq 124 ]; then
+    warn "直连 github.com 超时（25s），改用加速代理…"
   fi
   # 直连失败：拿原始 GitHub URL（剥掉可能已有的代理前缀）
   gh_url="$(git remote get-url origin)"
@@ -70,13 +78,13 @@ git_fetch_with_fallback() {
     return 1
   fi
   proxy_url="${GH_PROXY}${gh_url}"
-  warn "直连 github.com 失败（国内网络常见），改用加速代理重试…"
-  warn "  代理: $proxy_url"
+  warn "改用加速代理重试（$GH_PROXY）…"
   echo ">>> fetch (经代理 $GH_PROXY)" >> "$LOG_FILE"
-  if git fetch "$proxy_url" "${BRANCH}:refs/remotes/origin/${BRANCH}" --depth=1 2>&1 | tee -a "$LOG_FILE"; then
-    return 0
-  fi
-  return 1
+  # 用 + 强制更新远端跟踪分支：浅克隆（--depth=1）会截断历史，
+  # 导致 origin/main 与远端不再是祖先关系，普通 fetch 会报
+  # "rejected (non-fast-forward)"。这里本就只取最新快照，强制覆盖即可。
+  timeout 90 git fetch "$proxy_url" "+${BRANCH}:refs/remotes/origin/${BRANCH}" --depth=1 2>&1 | tee -a "$LOG_FILE"
+  return "${PIPESTATUS[0]}"
 }
 
 # ---------- 子命令：logs ----------

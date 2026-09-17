@@ -1912,7 +1912,11 @@ const KEDIT = (() => {
       const mid = m => (typeof m === 'string' ? m : (m && m.id) || '');
       // 已带前缀的字符串直接用，否则按当前 tab 补前缀（与后端 resolveModel 一致）。
       const canonOf = m => { const s = mid(m); return s.includes(':') ? s : CANON(d.tab, s); };
-      const shown = q ? models.filter(m => mid(m).toLowerCase().includes(q)) : models;
+      // 搜索与展示都基于「归一化后的 id」（始终带 realm 前缀），
+      // 否则默认模式（裸名）与 all=1 模式（带前缀）显示不一致，
+      // 且用户搜 "global:" 会搜不到。勾选值也用的是 id，三者保持一致。
+      const idOf = m => canonOf(m);
+      const shown = q ? models.filter(m => idOf(m).toLowerCase().includes(q)) : models;
       // 先渲染账号池列表项；id 集合用于判定"已选但不在池中"的手动项。
       const seen = new Set();
       let opts = shown.map(m => {
@@ -1920,7 +1924,7 @@ const KEDIT = (() => {
         seen.add(id);
         return '<label><input type="checkbox" data-act="model" data-i="' + i +
           '" value="' + esc(id) + '"' + (d.allow.has(id) ? ' checked' : '') +
-          '><span>' + esc(mid(m)) + '</span></label>';
+          '><span>' + esc(id) + '</span></label>';
       }).join('');
       // 关键：把 allow 里"不在当前 tab 账号池列表"的项（如手动添加的模型）
       // 也渲染出来并保持勾选——否则刷新后看不见、也无法取消勾选删除。
