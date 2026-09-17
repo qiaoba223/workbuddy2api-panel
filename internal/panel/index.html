@@ -126,12 +126,34 @@ body {
 .qdot.skip { background: var(--ink-3); }
 @keyframes qpulse { 50% { opacity: .35; } }
 @media (prefers-reduced-motion: reduce) { .qdot.run { animation: none; } }
-.srow { display: grid; grid-template-columns: minmax(150px, 210px) 1fr auto; gap: 14px; align-items: center; padding: 13px 16px; }
+/* ── 开学季表：窄屏整表横向滑动 ───────────────────────────────────────
+   与成长任务队列同一套方案（见 .qscroll 注释）。
+   .srow 是 3 列 grid（账号 150-210px | 任务组 1fr | 抽奖 auto），
+   .stasks 内又是 5 列；合计至少需 ~560px，塞不进手机 390px：
+   底部账号列吃掉 150px 后，5 个任务列各被压到 ~44px，文字被 overflow:hidden
+   截断且无处可滑（此前漏改此处，表现为"开学季表也滑不动"）。
+   处理：外层 .swrap > .swrap-scroll 横向滚动，表头 .shead 与数据行 .srow
+   一起平移，保证表头与列对齐。 */
+.swrap { position: relative; }
+.swrap-scroll {
+  overflow-x: auto;
+  overflow-y: hidden;              /* 与 overflow-x:auto 同用时 visible 会被强制算成 auto */
+  touch-action: pan-x;             /* 本层只接管横向，纵向留给页面 */
+  overscroll-behavior-x: contain;
+  -webkit-overflow-scrolling: touch;
+  scrollbar-width: none;
+  margin: 0 -16px;
+  padding: 0 16px;
+}
+.swrap-scroll::-webkit-scrollbar { display: none; }
+.swrap-table { width: max-content; min-width: 100%; }
+
+.srow { display: grid; grid-template-columns: minmax(150px, 210px) minmax(340px, 1fr) auto; gap: 14px; align-items: center; padding: 13px 16px; }
 .srow + .srow { border-top: 1px solid var(--line-soft); }
 .srow .who .nm { font-weight: 600; font-size: 13.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .srow .who .id { font: 10.5px var(--mono); color: var(--ink-3); margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .shead {
-  display: grid; grid-template-columns: minmax(150px, 210px) 1fr auto;
+  display: grid; grid-template-columns: minmax(150px, 210px) minmax(340px, 1fr) auto;
   gap: 14px; align-items: center; padding: 9px 16px 7px;
   font-size: 11.5px; color: var(--ink-3); border-bottom: 1px solid var(--line-soft);
 }
@@ -659,7 +681,11 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
           <button class="xs primary" id="btnSchoolRunAll">全部账号执行闭环</button>
         </header>
         <div class="state" id="schoolState"><span class="dots">加载中</span></div>
-        <div id="schoolList"></div>
+        <div class="swrap">
+          <button class="qnav prev" id="scPrev" type="button" aria-label="向左看" hidden>‹</button>
+          <div id="schoolList"></div>
+          <button class="qnav next" id="scNext" type="button" aria-label="向右看" hidden>›</button>
+        </div>
       </div>
 
       <div class="box">

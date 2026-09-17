@@ -382,6 +382,7 @@ function switchView(v) {
   if (v === 'usage') loadUsage();
   if (v === 'packages') loadPackages();
   if (v === 'taskscenter') { loadSchoolStatus(true); pollQueueOnce(); }
+  else scanHold = false;   // 离开任务中心则解除扫描保持，下次进入展示实时队列状态
 }
 /* 导航点击绑定移到文件末尾的启动 IIFE（必须在 gate() 之后，见该处注释）。 */
 
@@ -1076,7 +1077,8 @@ async function loadSchoolStatus(quiet) {
     const head = '<div class="shead"><div class="who">账号</div><div class="stasks">' +
       SCHOOL_META.map(([, name]) => '<span>' + esc(name) + '</span>').join('') +
       '</div><div class="luck">剩余抽奖</div></div>';
-    list.innerHTML = head + arr.map(v => {
+    // 外层滚动壳：表头 + 数据行一起横向平移（窄屏表宽 ~560px，见 index.html 注释）。
+    list.innerHTML = '<div class="swrap-scroll"><div class="swrap-table">' + head + arr.map(v => {
       const by = {};
       (v.tasks || []).forEach(t => by[t.task_code] = t);
       const cells = SCHOOL_META.map(([code]) => {
@@ -1094,9 +1096,10 @@ async function loadSchoolStatus(quiet) {
         '<div class="luck" title="剩余抽奖次数">' + LUCK_SVG + (v.chances == null ? '—' : v.chances) + '</div>' +
         (v.error ? '<div class="err">' + esc(v.error) + '</div>' : '') +
         '</div>';
-    }).join('');
+    }).join('') + '</div></div>';
     $('schoolSummary').textContent = allDone === arr.length ? '今日全部完成 🎉' : allDone + '/' + arr.length + ' 个账号今日全部完成';
     st.hidden = true;
+    bindSchoolNav();
   } catch (e) {
     st.hidden = false; st.className = 'state err'; st.textContent = e.message;
   }
@@ -1354,12 +1357,18 @@ $('btnVcRefresh').onclick = loadSchoolVouchers;
    （running=false 但 seq 停在旧值）不再回写视图——否则扫描结果 3 秒后被上一轮
    队列状态覆盖。 */
 let queueTimer = null, lastQueueSeq = 0;
+// scanHold：用户刚点「扫描待办」后为 true，暂停自动轮询回写队列视图，
+// 避免扫描结果被后端上一轮队列的残留数据覆盖（见 pollQueueOnce 注释）。
+// 点「执行全部待办」启动新队列、或切走视图时清除。
+let scanHold = false;
 const GROWTH_TITLES = {}; // code → 展示名（扫描时从任务列表带出）
 $('btnScanAll').onclick = async () => {
   const b = $('btnScanAll');
   b.disabled = true; b.textContent = '扫描中…';
   try {
     const d = await api('tasks/scan_all', { method: 'POST' });
+    // 扫描结果展示后进入"保持"状态，防止 5 秒一次的自动轮询用后端残留队列数据覆盖它。
+    scanHold = true;
     renderQueue(groupItems(d), null, '没有待办任务 🎉', '全部账号的成长任务与开学季活动都已完成，明日再来。');
   } catch (e) { toast(e.message, 'err'); }
   finally { b.disabled = false; b.textContent = '扫描待办'; }
@@ -1373,6 +1382,7 @@ $('btnRunQueue').onclick = async () => {
     const r = await api('tasks/run_queue', { method: 'POST', body: JSON.stringify({ concurrency: conc }) });
     if (!r.started) { toast(r.message || '没有待办任务', 'ok'); return; }
     lastQueueSeq = r.seq || 0;
+    scanHold = false;   // 启动新队列，恢复自动轮询回写
     toast('队列已启动：' + r.total + ' 项（并发 ' + conc + '）', 'ok');
     startQueuePolling();
   } catch (e) { toast(e.message, 'err'); }
@@ -1472,6 +1482,33 @@ function bindScrollNav() {
   }
   sync();
 }
+
+/* 开学季表的滚动导航：与 bindScrollNav 同逻辑，作用于 .swrap-scroll + #scPrev/#scNext。
+   两处表格（成长任务队列、开学季）共用 .qnav 按钮样式与交互。 */
+function bindSchoolNav() {
+  const list = $('schoolList');
+  const sc = list && list.querySelector('.swrap-scroll');
+  const prev = $('scPrev'), next = $('scNext');
+  if (!sc || !prev || !next) return;
+
+  const step = () => Math.max(160, Math.round(sc.clientWidth * 0.8));
+  const sync = () => {
+    const overflow = sc.scrollWidth > sc.clientWidth + 1;
+    prev.hidden = next.hidden = !overflow;
+    if (!overflow) return;
+    prev.disabled = sc.scrollLeft <= 1;
+    next.disabled = sc.scrollLeft >= sc.scrollWidth - sc.clientWidth - 1;
+  };
+  prev.onclick = e => { e.preventDefault(); sc.scrollLeft -= step(); };
+  next.onclick = e => { e.preventDefault(); sc.scrollLeft += step(); };
+  sc.addEventListener('scroll', sync, { passive: true });
+  if (window.ResizeObserver) {
+    if (bindSchoolNav._ro) bindSchoolNav._ro.disconnect();
+    bindSchoolNav._ro = new ResizeObserver(sync);
+    bindSchoolNav._ro.observe(sc);
+  }
+  sync();
+}
 // 队列状态 → 分组（执行时轮询）
 function groupsFromQueue(items) {
   const by = new Map();
@@ -1491,6 +1528,12 @@ async function pollQueueOnce() {
     if (!q.started) return;
     // 只渲染本页启动过的那轮队列（q.running 时也要同代次——刷新页面后不再接管旧队列）。
     if (lastQueueSeq && q.seq !== lastQueueSeq) return;
+    // ★ 用户刚点过「扫描待办」：此时视图里是扫描结果（列 = 全部待办），
+    //   不能被后端上一轮队列的残留 items 覆盖。此前仅靠 lastQueueSeq 判断，
+    //   但从未点过「执行全部待办」时它恒为 0，保护失效 →
+    //   扫描结果最多 5 秒后（refTimer）即被残留数据冲掉，表现为"任务出现一会又消失"。
+    //   这里显式拦住：扫描后自动轮询不再回写，直到用户启动新队列或切走视图。
+    if (scanHold) return;
     renderQueue(groupsFromQueue(q.items || []), q);
   } catch (e) { /* 静默 */ }
 }
