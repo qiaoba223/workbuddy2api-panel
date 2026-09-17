@@ -1099,7 +1099,6 @@ async function loadSchoolStatus(quiet) {
     }).join('') + '</div></div>';
     $('schoolSummary').textContent = allDone === arr.length ? '今日全部完成 🎉' : allDone + '/' + arr.length + ' 个账号今日全部完成';
     st.hidden = true;
-    bindSchoolNav();
   } catch (e) {
     st.hidden = false; st.className = 'state err'; st.textContent = e.message;
   }
@@ -1442,7 +1441,6 @@ function renderQueue(groups, progress, emptyTitle, emptyDesc) {
   }).join('') + '</div></div>';
   $('qcSummary').textContent = total + ' 项';
   updateProgress(progress);
-  bindScrollNav();
 }
 function updateProgress(q) {
   if (!q || !q.items) { $('qProg').hidden = true; return; }
@@ -1453,62 +1451,6 @@ function updateProgress(q) {
   $('qProgText').textContent = (q.running ? '执行中 ' : '已结束 ') + done + ' / ' + total;
 }
 
-/* 滚动导航：给横向溢出的队列表加左右翻页按钮。
-   为什么需要：横向滚动手势在部分触屏/WebView 里不可靠（斜向拖动可能被判为
-   纵向滚动；某些内置浏览器对嵌套横向滚动支持也差）。点按按钮不依赖手势识别，
-   任何环境都能看全内容。按钮仅在内容确实溢出时显示，滑到头自动禁用。 */
-function bindScrollNav() {
-  const list = $('qcList');
-  const sc = list && list.querySelector('.qscroll');
-  const prev = $('qcPrev'), next = $('qcNext');
-  if (!sc || !prev || !next) return;
-
-  const step = () => Math.max(160, Math.round(sc.clientWidth * 0.8)); // 一次约翻 80% 屏宽
-  const sync = () => {
-    const overflow = sc.scrollWidth > sc.clientWidth + 1;
-    prev.hidden = next.hidden = !overflow;
-    if (!overflow) return;
-    prev.disabled = sc.scrollLeft <= 1;
-    next.disabled = sc.scrollLeft >= sc.scrollWidth - sc.clientWidth - 1;
-  };
-  prev.onclick = e => { e.preventDefault(); sc.scrollLeft -= step(); };
-  next.onclick = e => { e.preventDefault(); sc.scrollLeft += step(); };
-  sc.addEventListener('scroll', sync, { passive: true });
-  // 容器尺寸变化（旋屏、窗口缩放）后重新判断是否需要箭头
-  if (window.ResizeObserver) {
-    if (bindScrollNav._ro) bindScrollNav._ro.disconnect();
-    bindScrollNav._ro = new ResizeObserver(sync);
-    bindScrollNav._ro.observe(sc);
-  }
-  sync();
-}
-
-/* 开学季表的滚动导航：与 bindScrollNav 同逻辑，作用于 .swrap-scroll + #scPrev/#scNext。
-   两处表格（成长任务队列、开学季）共用 .qnav 按钮样式与交互。 */
-function bindSchoolNav() {
-  const list = $('schoolList');
-  const sc = list && list.querySelector('.swrap-scroll');
-  const prev = $('scPrev'), next = $('scNext');
-  if (!sc || !prev || !next) return;
-
-  const step = () => Math.max(160, Math.round(sc.clientWidth * 0.8));
-  const sync = () => {
-    const overflow = sc.scrollWidth > sc.clientWidth + 1;
-    prev.hidden = next.hidden = !overflow;
-    if (!overflow) return;
-    prev.disabled = sc.scrollLeft <= 1;
-    next.disabled = sc.scrollLeft >= sc.scrollWidth - sc.clientWidth - 1;
-  };
-  prev.onclick = e => { e.preventDefault(); sc.scrollLeft -= step(); };
-  next.onclick = e => { e.preventDefault(); sc.scrollLeft += step(); };
-  sc.addEventListener('scroll', sync, { passive: true });
-  if (window.ResizeObserver) {
-    if (bindSchoolNav._ro) bindSchoolNav._ro.disconnect();
-    bindSchoolNav._ro = new ResizeObserver(sync);
-    bindSchoolNav._ro.observe(sc);
-  }
-  sync();
-}
 // 队列状态 → 分组（执行时轮询）
 function groupsFromQueue(items) {
   const by = new Map();

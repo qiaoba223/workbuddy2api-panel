@@ -138,7 +138,7 @@ body {
 .swrap-scroll {
   overflow-x: auto;
   overflow-y: hidden;              /* 与 overflow-x:auto 同用时 visible 会被强制算成 auto */
-  touch-action: pan-x;             /* 本层只接管横向，纵向留给页面 */
+  touch-action: auto;              /* 同 .qscroll：不能用 pan-x，否则纵向滑不动页面 */
   overscroll-behavior-x: contain;
   -webkit-overflow-scrolling: touch;
   scrollbar-width: none;
@@ -477,24 +477,20 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
      做法：**整表一起横向滑动**（外层 .qscroll 滚动，内层 .qtable 用 max-content
      自然撑宽），所有行同步平移，一次拖到底即可对齐看完每行说明。
 
-     为什么额外加左右箭头按钮（.qnav）：
-     横向滚动手势在部分环境不可靠 —— 触屏上手指斜向拖动可能被判为纵向滚动，
-     微信内置浏览器等 WebView 对嵌套横向滚动支持也参差。加按钮后可**点按**翻页，
-     不依赖手势识别，任何环境都能看全。箭头仅在内容确实溢出时显示。
-
      ⚠ 踩过的坑：
      1) `overflow-y: visible` 与 `overflow-x: auto` 同用会被**强制算成 auto**
         （CSS 规范），使容器纵向也独立滚动、干扰手势。这里显式写 hidden。
-     2) `touch-action: pan-x pan-y` 在部分 WebView 里会让横向手势失效，
-        改 `pan-x`（本层只管横向，纵向交给页面）。 */
+     2) **`touch-action` 不能用 `pan-x`**：它的语义是"本区域只处理横向手势"，
+        纵向被一并吞掉 —— 表现为"能左右滑、但手指按在表内往下滑不动页面"。
+        必须用默认 `auto`：横纵都交给浏览器仲裁，横向因本容器可滚而滚本容器，
+        纵向冒泡给页面滚，这是原生支持的嵌套滚动场景，无需干预。
+     3) 曾加过 ‹ › 翻页按钮兜底手势，实测手势本身可靠，已移除（含 .qnav 样式与
+        bindScrollNav/bindSchoolNav 逻辑），保持纯手势滑动，界面更干净。 */
   .qwrap { position: relative; }
-  /* 按钮定位基准：让它始终贴合滚动壳的垂直中心，而不是 .qwrap。
-     之前用 .qwrap + top:50%，当列表很矮时按钮被挤出可视区，
-     点击落到了外层 .view 上（命中测试失败）→ 点了没反应。 */
   .qscroll {
     overflow-x: auto;
     overflow-y: hidden;
-    touch-action: pan-x;
+    touch-action: auto;              /* 见上方坑 2：不能用 pan-x */
     overscroll-behavior-x: contain;
     -webkit-overflow-scrolling: touch;
     scrollbar-width: none;
@@ -504,24 +500,6 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
   .qscroll::-webkit-scrollbar { display: none; }
   .qtable { width: max-content; min-width: 100%; }
   .qgroup header { padding: 6px 14px; }
-
-  /* 左右翻页按钮：点一下平移一屏。给不依赖手势的环境兜底。
-     用 fixed 定位到列表可视区的左右边缘，避免被任何祖先的
-     overflow/高度裁剪。 */
-  .qnav {
-    position: absolute; top: 50%; transform: translateY(-50%);
-    z-index: 5; width: 34px; height: 34px; padding: 0;
-    border-radius: 50%; border: 1px solid var(--line-soft);
-    background: var(--bg-2, #fff); color: var(--ink-1);
-    font-size: 20px; line-height: 1; cursor: pointer;
-    display: flex; align-items: center; justify-content: center;
-    box-shadow: 0 2px 8px rgba(0,0,0,.18);
-    opacity: .94;
-  }
-  .qnav.prev { left: 6px; }
-  .qnav.next { right: 6px; }
-  .qnav:active { opacity: 1; transform: translateY(-50%) scale(.94); }
-  .qnav[disabled] { opacity: .3; cursor: default; }
 
   .qrow {
     display: grid;
@@ -682,9 +660,7 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
         </header>
         <div class="state" id="schoolState"><span class="dots">加载中</span></div>
         <div class="swrap">
-          <button class="qnav prev" id="scPrev" type="button" aria-label="向左看" hidden>‹</button>
           <div id="schoolList"></div>
-          <button class="qnav next" id="scNext" type="button" aria-label="向右看" hidden>›</button>
         </div>
       </div>
 
@@ -712,9 +688,7 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
           <div class="d">扫描所有账号的成长任务与开学季待办，把没做的排成一列，一键执行。</div>
         </div>
         <div class="qwrap">
-          <button class="qnav prev" id="qcPrev" type="button" aria-label="向左看" hidden>‹</button>
           <div id="qcList"></div>
-          <button class="qnav next" id="qcNext" type="button" aria-label="向右看" hidden>›</button>
         </div>
       </div>
     </section>
@@ -1101,11 +1075,23 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
       <div class="hint" id="loginHint">请输入面板账号与密码。</div>
     </header>
     <div class="body">
-      <input type="text" id="loginUser" placeholder="用户名" autocomplete="username" style="margin-bottom:8px">
-      <input type="password" id="loginPass" placeholder="密码" autocomplete="current-password">
+      <!-- autocomplete 的取舍（踩过的坑）：
+           这里曾用规范值 username / current-password，让浏览器把它当"登录表单"。
+           副作用：手机浏览器（iOS Safari、部分 Android WebView）会在你**输入密码时**
+           弹出密码自动填充条，并把焦点抢回它认为的"第一个字段"（用户名），
+           表现为"输密码指针跳到用户名框"。
+           面板账号是自建的（admin + 自定义密码），不是第三方站点的通用登录，
+           对自动填充没有收益，因此统一改为 off 抑制该行为。
+           ⚠ 注意：Chrome 对 autocomplete="off" 在"疑似登录表单"上会刻意忽略，
+           所以密码框额外用 data-* 兜底（见 app.js 的 loginAutofillGuard）。 -->
+      <input type="text" id="loginUser" placeholder="用户名" autocomplete="off"
+             autocapitalize="off" autocorrect="off" spellcheck="false"
+             name="panel-user" style="margin-bottom:8px">
+      <input type="password" id="loginPass" placeholder="密码" autocomplete="off"
+             name="panel-pass">
       <!-- 首次初始化专用：确认密码。平时隐藏。 -->
-      <input type="password" id="loginPass2" placeholder="再次输入密码" autocomplete="new-password"
-             style="margin-top:8px" hidden>
+      <input type="password" id="loginPass2" placeholder="再次输入密码" autocomplete="off"
+             name="panel-pass2" style="margin-top:8px" hidden>
       <div class="state err" id="loginErr" hidden style="margin-top:10px"></div>
     </div>
     <footer>
@@ -1125,20 +1111,20 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
     <div class="body">
       <label class="fld">
         <span class="lb">用户名</span>
-        <input type="text" id="pwdUser" autocomplete="username">
+        <input type="text" id="pwdUser" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false">
       </label>
       <label class="fld">
         <span class="lb">当前密码</span>
-        <input type="password" id="pwdOld" autocomplete="current-password">
+        <input type="password" id="pwdOld" autocomplete="off">
         <span class="hint">仅修改用户名时也必须填写（用于确认身份）</span>
       </label>
       <label class="fld">
         <span class="lb">新密码</span>
-        <input type="password" id="pwdNew" autocomplete="new-password" placeholder="留空 = 不修改密码">
+        <input type="password" id="pwdNew" autocomplete="off" placeholder="留空 = 不修改密码">
       </label>
       <label class="fld">
         <span class="lb">确认新密码</span>
-        <input type="password" id="pwdNew2" autocomplete="new-password" placeholder="留空 = 不修改密码">
+        <input type="password" id="pwdNew2" autocomplete="off" placeholder="留空 = 不修改密码">
       </label>
       <div class="state err" id="pwdErr" hidden></div>
     </div>
@@ -1158,7 +1144,7 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
       <div class="hint">该网关已启用 api_key 鉴权，请输入 config.json 中的密钥。</div>
     </header>
     <div class="body">
-      <input type="password" id="keyInput" placeholder="api_key" autocomplete="current-password">
+      <input type="password" id="keyInput" placeholder="api_key" autocomplete="off">
       <div class="state err" id="keyErr" hidden style="margin-top:10px">密钥不正确，请重试。</div>
     </div>
     <footer>
