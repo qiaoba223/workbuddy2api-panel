@@ -190,6 +190,18 @@ $('loginPass').addEventListener('keydown', e => { if (e.key === 'Enter') setupMo
 $('loginPass2').addEventListener('keydown', e => { if (e.key === 'Enter') doLogin(); });
 $('loginUser').addEventListener('keydown', e => { if (e.key === 'Enter') $('loginPass').focus(); });
 
+/* 伪密码框降级：不支持 -webkit-text-security 的浏览器（少见）会显示明文。
+   此时退回到"真密码框 + 关闭自动填充"，至少视觉安全。
+   检测方式：设置该属性后读取是否生效。 */
+(function secretFallback() {
+  const probe = document.createElement('input');
+  probe.style.webkitTextSecurity = 'disc';
+  // Chrome/Safari/微信 WebView 支持；Firefox 长期不支持。
+  if (probe.style.webkitTextSecurity !== 'disc') {
+    document.querySelectorAll('.secret').forEach(el => { el.type = 'password'; });
+  }
+})();
+
 async function doLogin() {
   const u = $('loginUser').value.trim(), p = $('loginPass').value;
   if (!u || !p) return;

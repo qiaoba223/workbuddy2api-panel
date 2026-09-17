@@ -206,6 +206,9 @@ input:focus, select:focus { outline: none; border-color: var(--accent); }
 input.invalid { border-color: var(--bad); background: var(--bad-soft); }
 input.invalid:focus { border-color: var(--bad); }
 input[type=checkbox] { width: auto; accent-color: var(--accent); }
+/* 伪密码框：用 type="text" 避开浏览器自动填充（详见登录框处的长注释），
+   这里负责把它显示成圆点。不支持该属性的浏览器会退化为明文，功能不受影响。 */
+input.secret { -webkit-text-security: disc; text-security: disc; }
 label.fld { display: block; margin-bottom: 14px; }
 label.fld > .lb { display: block; font-size: 12.5px; color: var(--ink-2); margin-bottom: 5px; }
 label.fld > .hint { display: block; font-size: 11.5px; color: var(--ink-3); margin-top: 4px; }
@@ -1075,22 +1078,30 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
       <div class="hint" id="loginHint">请输入面板账号与密码。</div>
     </header>
     <div class="body">
-      <!-- autocomplete 的取舍（踩过的坑）：
-           这里曾用规范值 username / current-password，让浏览器把它当"登录表单"。
-           副作用：手机浏览器（iOS Safari、部分 Android WebView）会在你**输入密码时**
-           弹出密码自动填充条，并把焦点抢回它认为的"第一个字段"（用户名），
-           表现为"输密码指针跳到用户名框"。
-           面板账号是自建的（admin + 自定义密码），不是第三方站点的通用登录，
-           对自动填充没有收益，因此统一改为 off 抑制该行为。
-           ⚠ 注意：Chrome 对 autocomplete="off" 在"疑似登录表单"上会刻意忽略，
-           所以密码框额外用 data-* 兜底（见 app.js 的 loginAutofillGuard）。 -->
+      <!-- ⚠ 为什么密码框不用 type="password"（踩了很深的坑，别改回去）：
+           用 type="password" 时，浏览器/系统密码管理器会把它识别为密码字段并介入，
+           在手机上表现为「在密码框输入时，焦点被自动跳到账号框」。
+           试过的手段与结果：
+             - autocomplete="username/current-password" → 加剧问题
+             - autocomplete="off"                       → Chrome 对登录表单刻意忽略，无效
+             - 运行时 focusin 抢回焦点                   → 与手指操作打架，更糟
+           最终方案：改用 type="text" 伪装成普通输入框，浏览器不再视其为密码字段，
+           自然不再介入。视觉上靠 CSS 的 -webkit-text-security: disc 显示为圆点，
+           逻辑上仍是普通文本，后端接口不受影响（本来收的就是 form 里的明文）。
+           安全性：不走 type="password" 不改变传输安全（HTTPS 才是关键），
+           仅少了浏览器自带的"复制提示"，故补 spellcheck/autocorrect 等关闭项。
+           兼容：-webkit-text-security 在 Chrome/Safari/微信 WebView 均支持；
+           不支持的老浏览器会显示明文，此时用 JS 兜底加 letter-spacing 属性无效，
+           故保留 type 切换能力（见 app.js 的 applySecretMask）。 -->
       <input type="text" id="loginUser" placeholder="用户名" autocomplete="off"
              autocapitalize="off" autocorrect="off" spellcheck="false"
              name="panel-user" style="margin-bottom:8px">
-      <input type="password" id="loginPass" placeholder="密码" autocomplete="off"
+      <input type="text" id="loginPass" class="secret" placeholder="密码" autocomplete="off"
+             autocapitalize="off" autocorrect="off" spellcheck="false"
              name="panel-pass">
       <!-- 首次初始化专用：确认密码。平时隐藏。 -->
-      <input type="password" id="loginPass2" placeholder="再次输入密码" autocomplete="off"
+      <input type="text" id="loginPass2" class="secret" placeholder="再次输入密码" autocomplete="off"
+             autocapitalize="off" autocorrect="off" spellcheck="false"
              name="panel-pass2" style="margin-top:8px" hidden>
       <div class="state err" id="loginErr" hidden style="margin-top:10px"></div>
     </div>
