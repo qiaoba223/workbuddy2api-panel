@@ -220,9 +220,10 @@ func main() {
 
 	// 管理面板日志镜像：标准 log（stderr）与 chat 表格日志（stdout）双路复制进
 	// 面板环形缓冲，供 /panel/api/logs 读取；控制台输出行为完全不变。
-	// live 承载可热改字段（api_key/soft_rate/脱敏开关），面板保存配置时在线替换。
+	// live 承载可热改字段（api_key/keys/soft_rate/脱敏开关），面板保存配置时在线替换。
 	live := livecfg.New(livecfg.Snapshot{
 		APIKey:               cfg.APIKey,
+		Keys:                 cfg.Keys,
 		SoftCooldown:         cfg.SoftRateDur,
 		SanitizeFingerprints: cfg.Features.SanitizeBlacklistFingerprints,
 	})
@@ -394,12 +395,20 @@ func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up 
 		return nil, fmt.Errorf("write config: %w", err)
 	}
 	if err := os.Rename(tmp, path); err != nil {
-		return nil, fmt.Errorf("replace config: %w", err)
+		// 单文件 bind mount（docker-compose 的 ./config.json:/app/config.json）下，
+		// 目标路径是挂载点，内核禁止 rename 覆盖 → EBUSY("device or resource busy")。
+		// 回退：直接截断写入原文件（非原子，但满足"面板保存能落盘"这一硬需求）。
+		// 其它错误（权限、磁盘满等）同样走此路径，失败则原样上报。
+		_ = os.Remove(tmp)
+		if werr := os.WriteFile(path, out, 0o600); werr != nil {
+			return nil, fmt.Errorf("replace config: %w (fallback write: %v)", err, werr)
+		}
 	}
 
 	// 4) 热应用：能立即生效的字段全部应用，并列出仍需重启的字段。
 	live.Store(livecfg.Snapshot{
 		APIKey:               newCfg.APIKey,
+		Keys:                 newCfg.Keys,
 		SoftCooldown:         newCfg.SoftRateDur,
 		SanitizeFingerprints: newCfg.Features.SanitizeBlacklistFingerprints,
 	})

@@ -9,6 +9,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"sort"
 	"strings"
 
 	"sync"
@@ -157,14 +158,57 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	h.mux.ServeHTTP(w, r)
 }
 
+// ctxKeyEntry 携带本请求匹配到的受限密钥条目（主密钥时为 nil）。
+type ctxKey struct{}
+
+// withAuth 鉴权：主密钥（全模型）或 keys[] 中任一受限密钥均可通过。
+// 受限密钥写入请求 context，供 chatCompletions / models 做白名单过滤。
 func (h *Handler) withAuth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if !httpauth.VerifyBearer(r, h.loadLive().APIKey) {
-			writeOpenAIError(w, http.StatusUnauthorized, "invalid_api_key", "missing or invalid API key")
+		live := h.loadLive()
+		presented := bearerToken(r)
+
+		// 主密钥：全模型放行（零回归）。空主密钥 = 不鉴权（历史行为）。
+		if httpauth.VerifyBearer(r, live.APIKey) {
+			next(w, r)
 			return
 		}
-		next(w, r)
+		// 受限密钥：命中后把白名单带进 context。
+		if entry, ok := findAPIKey(live.Keys, presented); ok {
+			next(w, r.WithContext(context.WithValue(r.Context(), ctxKey{}, entry)))
+			return
+		}
+		writeOpenAIError(w, http.StatusUnauthorized, "invalid_api_key", "missing or invalid API key")
 	}
+}
+
+// bearerToken 取出 Authorization: Bearer <token> 的 token 部分（无则空串）。
+func bearerToken(r *http.Request) string {
+	const p = "Bearer "
+	h := r.Header.Get("Authorization")
+	if len(h) <= len(p) || !strings.EqualFold(h[:len(p)], p) {
+		// 兼容 x-api-key（部分客户端用）
+		return r.Header.Get("X-Api-Key")
+	}
+	return strings.TrimSpace(h[len(p):])
+}
+
+// entryFromCtx 取本请求的受限密钥条目；主密钥/未鉴权时返回 (零值, false)。
+func entryFromCtx(r *http.Request) (APIKeyEntry, bool) {
+	e, ok := r.Context().Value(ctxKey{}).(APIKeyEntry)
+	return e, ok
+}
+
+// entryName 返回条目的可读标识（优先备注名，其次打码 key），用于报错信息。
+// 不完整回显 key，避免错误信息把密钥写进客户端日志。
+func entryName(e APIKeyEntry) string {
+	if e.Name != "" {
+		return e.Name
+	}
+	if len(e.Key) <= 6 {
+		return "***"
+	}
+	return e.Key[:4] + "…" + e.Key[len(e.Key)-2:]
 }
 
 func (h *Handler) healthz(w http.ResponseWriter, r *http.Request) {
@@ -246,9 +290,52 @@ const (
 // models 返回模型列表：纯动态（缓存 1h），失败/无号返回空列表（无静态兜底——
 // 拉不出目录即意味着上游不可用，假名单只会让客户端选到 11102 的模型）。
 func (h *Handler) models(w http.ResponseWriter, r *http.Request) {
+	list := h.modelList()
+	// 受限密钥：只列出白名单内的模型（空白名单 → 空列表，未配置即不可用）。
+	// 否则客户端会看到用不了的模型（调用时 403），体验割裂且误导。
+	if entry, ok := entryFromCtx(r); ok {
+		allow := normalizeAllow(entry.Allow)
+		filtered := make([]map[string]any, 0, len(list))
+		matched := make(map[string]struct{}, len(list))
+		for _, m := range list {
+			if id, _ := m["id"].(string); id != "" {
+				key := canonicalModelKey(id)
+				if _, hit := allow[key]; hit {
+					filtered = append(filtered, m)
+					matched[key] = struct{}{}
+				}
+			}
+		}
+		// 补全：白名单里"上游动态目录未列出"的模型（如手动添加的
+		// global:deepseek-v4.1-flash——上游可用但 /v3/config 不列）。
+		// 若不补，客户端 /v1/models 看不到它，也就无从选择；而实际调用
+		// 是通的（allowedModel 按白名单放行）。此处只输出裸条目，
+		// 不编造 context_length 等元数据（上游未下发即省略）。
+		extra := make([]map[string]any, 0)
+		for key := range allow {
+			if _, hit := matched[key]; hit {
+				continue
+			}
+			realm, _ := resolveModel(key)
+			extra = append(extra, map[string]any{
+				"id":       key, // 统一带 realm 前缀，与调用时模型名一致
+				"object":   "model",
+				"created":  0,
+				"owned_by": realm,
+				"manual":   true, // 标识：非上游目录下发，由白名单手动补充
+			})
+		}
+		if len(extra) > 0 {
+			sort.Slice(extra, func(i, j int) bool {
+				return extra[i]["id"].(string) < extra[j]["id"].(string)
+			})
+			filtered = append(filtered, extra...)
+		}
+		list = filtered
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"object": "list",
-		"data":   h.modelList(),
+		"data":   list,
 	})
 }
 
@@ -482,6 +569,16 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	// bareModel 用于选号/粘性/出站 body 重写（前缀是网关侧路由协议，上游只认裸名）。
 	// 裸名 → ("cn", 原串)，CN 现状零回归。
 	realm, bareModel := resolveModel(peek.Model)
+
+	// 受限密钥白名单（多 key 分组）：非主密钥时，请求的模型必须在 Allow 内。
+	// 放在 resolveModel 之后、任何上游动作之前——越权请求不打上游、不罚号、不轮转。
+	// 用 peek.Model 原样比对（归一化在 allowedModel 内部按 resolveModel 规则做）。
+	if entry, ok := entryFromCtx(r); ok && !allowedModel(entry, peek.Model) {
+		writeOpenAIError(w, http.StatusForbidden, "model_not_allowed",
+			fmt.Sprintf("API key %q 无权访问模型 %q（白名单：%s）",
+				entryName(entry), peek.Model, strings.Join(entry.Allow, ", ")))
+		return
+	}
 
 	// 请求级统计：出口即打一行表格日志（任何路径都会走到）。
 	st := newChatStat(time.Now(), body, peek.Stream)

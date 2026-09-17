@@ -705,6 +705,7 @@ async function loadConfig() {
       else el.value = v == null ? '' : v;
     }
     markDurationFields(); // 回填后重置校验态（清掉残留红框；现值来自后端必然合法）
+    KEDIT.load(cfgLoaded && cfgLoaded.keys); // 白名单密钥区块（数组结构，不走 CFG_MAP）
     $('cfgNote').textContent = '';
   } catch (e) { toast('读取配置失败：' + e.message, 'err'); }
 }
@@ -724,6 +725,10 @@ function collectConfig() {
     }
     if (v !== undefined) put(out, path, v);
   }
+  // 白名单密钥：数组结构，无法走 CFG_MAP，单独收集。
+  // 必须每次都带 keys（哪怕空数组）—— 后端 mergeConfigMaps 对数组是整体替换，
+  // 不带则保留旧值，用户就删不掉密钥了。
+  out.keys = KEDIT.collect();
   return out;
 }
 /* Go 时长字段即时校验：空 = 沿用现值（collectConfig 跳过发送）；非空必须是
@@ -1804,3 +1809,300 @@ async function loadPackages() {
 }
 
 if ($('btnPk')) $('btnPk').onclick = loadPackages;
+
+/* ════════════════════════════════════════════════════════════════════════
+   白名单密钥编辑器（多 key + 按 realm 分组的模型白名单）
+
+   需求：除主密钥 api_key 外，可增删多个受限密钥；每个密钥勾选允许的模型，
+        且国内(cn) / 国际(global) 模型分开选，只能选账号池里实际存在的模型。
+        用该 key 调接口时，非白名单模型一律 403。
+
+   为什么单独一套 DOM 逻辑、不复用 CFG_MAP：
+     CFG_MAP 是「表单字段 → config 路径」的扁平映射，而 keys 是**数组**，
+     每项还带动态的模型列表，无法用固定 input id 表达。故独立渲染 + 收集。
+
+   与保存流程的衔接（关键）：
+     saveConfig 会从 KEDIT.collect() 取 keys 一并提交。
+     注意必须**始终提交 keys**（哪怕是空数组）——config 保存是 merge 语义，
+     缺键会保留旧值，导致"删掉的密钥又回来"。
+
+   数据形态：
+     { key: "sk-xxx", name: "备注", allow: ["cn:model-a", "global:model-b"] }
+     allow 为空数组 = 不限制（等价主密钥）。裸名默认 cn，与 resolveModel 一致。
+   ════════════════════════════════════════════════════════════════════════ */
+const KEDIT = (() => {
+  // 本地草稿状态：与 config.json 的 keys[] 一一对应。
+  // 每项：{ key, name, allow: Set<string>, tab: 'cn'|'global', query: string }
+  let drafts = [];
+  // 账号池模型缓存：{ cn: [模型名...], global: [模型名...] }
+  // 拉取失败时置 null，UI 退化为"手输模型名"提示，不阻塞其它配置编辑。
+  let modelCache = null;
+  // loadAll 为 true 表示当前列表来自「加载所有账号」（合并多账号、不去重）。
+  let loadAll = false;
+  let loading = false;
+
+  const CANON = (realm, name) => (realm === 'global' ? 'global:' : 'cn:') + name;
+
+  // 裸名（无 realm 前缀）按 cn 归一，与后端 resolveModel 保持一致。
+  function parseAllow(list) {
+    const out = [];
+    for (const raw of list || []) {
+      const s = String(raw).trim();
+      if (!s) continue;
+      out.push(s.includes(':') ? s : 'cn:' + s);
+    }
+    return out;
+  }
+
+  function genKey() {
+    // 面板生成：32 字节十六进制，避免用户手填弱 key。
+    // crypto.getRandomValues 在 http 下也可用（非安全上下文的例外）。
+    const a = new Uint8Array(24);
+    crypto.getRandomValues(a);
+    return 'sk-' + Array.from(a, b => b.toString(16).padStart(2, '0')).join('');
+  }
+
+  /* 手动添加模型名：取该卡片底部输入框的值，按当前 tab 补 realm 前缀后加入白名单。
+     允许添加账号池列表里没有的模型（用户按需手填）。加入后由 render 统一渲染为
+     已勾选项（含"手动"标记），因此刷新后依然可见、可取消勾选删除。 */
+  function addModelFromInput(i) {
+    const d = drafts[i];
+    if (!d) return;
+    const card = $('keyList').children[i];
+    const input = card && card.querySelector('[data-act=addmodel-input]');
+    if (!input) return;
+    let raw = (input.value || '').trim();
+    if (!raw) return;
+    // 已带 realm 前缀则尊重用户输入，否则按当前 tab 补前缀。
+    const id = raw.includes(':') ? raw : CANON(d.tab, raw);
+    d.allow.add(id);
+    input.value = '';
+    render();
+  }
+
+  /* 拉取账号池模型。默认按 realm 各一次（cn / global 各取一个账号的目录）；
+     传入 all=true 时改调 models?all=1，汇总**全部账号**的模型、按 realm 分组、
+     **不去重**（同名模型在多账号间重复出现属预期）。任一失败则整体降级。 */
+  async function ensureModels(all) {
+    if (modelCache && (all === loadAll)) return modelCache;
+    try {
+      if (all) {
+        const r = await api('models?all=1');
+        modelCache = { cn: r.cn || [], global: r.global || [] };
+      } else {
+        const [cn, gl] = await Promise.all([api('models'), api('models?realm=global')]);
+        modelCache = { cn: cn.models || [], global: gl.models || [] };
+      }
+      loadAll = !!all;
+    } catch (e) {
+      modelCache = { cn: [], global: [], err: e.message };
+    }
+    return modelCache;
+  }
+
+  function render() {
+    const list = $('keyList');
+    if (!list) return;
+    $('keyEmpty').hidden = drafts.length > 0;
+    list.innerHTML = drafts.map((d, i) => {
+      const models = (modelCache && modelCache[d.tab]) || [];
+      const q = (d.query || '').toLowerCase();
+      // 模型是对象（{id,name,...}，见 panel.go 的 models 端点），取 id 匹配；
+      // all=1 模式下 cn/global 已是 "cn:xxx" 字符串（已带 realm 前缀）。
+      const mid = m => (typeof m === 'string' ? m : (m && m.id) || '');
+      // 已带前缀的字符串直接用，否则按当前 tab 补前缀（与后端 resolveModel 一致）。
+      const canonOf = m => { const s = mid(m); return s.includes(':') ? s : CANON(d.tab, s); };
+      const shown = q ? models.filter(m => mid(m).toLowerCase().includes(q)) : models;
+      // 先渲染账号池列表项；id 集合用于判定"已选但不在池中"的手动项。
+      const seen = new Set();
+      let opts = shown.map(m => {
+        const id = canonOf(m);
+        seen.add(id);
+        return '<label><input type="checkbox" data-act="model" data-i="' + i +
+          '" value="' + esc(id) + '"' + (d.allow.has(id) ? ' checked' : '') +
+          '><span>' + esc(mid(m)) + '</span></label>';
+      }).join('');
+      // 关键：把 allow 里"不在当前 tab 账号池列表"的项（如手动添加的模型）
+      // 也渲染出来并保持勾选——否则刷新后看不见、也无法取消勾选删除。
+      // 仅在无搜索词时展示这些额外项，避免干扰搜索。
+      if (!q) {
+        const extra = [...d.allow].filter(id => {
+          if (seen.has(id)) return false;
+          const rid = id.includes(':') ? id.slice(0, id.indexOf(':')) : 'cn';
+          return (rid === 'global' ? 'global' : 'cn') === d.tab;
+        });
+        opts += extra.map(id => '<label><input type="checkbox" data-act="model" data-i="' + i +
+          '" value="' + esc(id) + '" checked><span>' + esc(id) +
+          ' <em class="kmanual">手动</em></span></label>').join('');
+      }
+      if (!opts) opts = '<div class="kempty">' +
+        (modelCache && modelCache.err ? '模型列表读取失败：' + esc(modelCache.err)
+                                      : '该 realm 暂无可用模型') + '</div>';
+      const nSel = [...d.allow].filter(a => a.startsWith(d.tab + ':')).length;
+      return '' +
+        '<div class="keycard">' +
+          '<div class="krow">' +
+            '<input type="text" class="kname" placeholder="备注名（可选）" data-act="name" data-i="' + i + '" value="' + esc(d.name) + '">' +
+            '<button type="button" class="mini" data-act="gen" data-i="' + i + '">随机生成</button>' +
+            '<button type="button" class="mini danger" data-act="del" data-i="' + i + '">删除</button>' +
+          '</div>' +
+          '<div class="krow">' +
+            '<input type="text" placeholder="密钥（sk-…）" data-act="key" data-i="' + i + '" value="' + esc(d.key) + '">' +
+          '</div>' +
+          '<div class="klabel">允许模型（<b>不勾选 = 该密钥禁止使用任何模型</b>）' +
+            '<span style="float:right">已选 ' + d.allow.size + ' 个</span></div>' +
+          (d.allow.size === 0
+            ? '<div class="kwarn">⚠ 未配置任何模型，该密钥将无法调用任何模型（403）。请至少勾选或手动添加一个模型。</div>'
+            : '') +
+          '<div class="ktabs">' +
+            '<button type="button" data-act="tab" data-i="' + i + '" data-v="cn"' + (d.tab === 'cn' ? ' class="on"' : '') + '>国内</button>' +
+            '<button type="button" data-act="tab" data-i="' + i + '" data-v="global"' + (d.tab === 'global' ? ' class="on"' : '') + '>国际</button>' +
+            '<span style="flex:1"></span>' +
+            '<span style="font-size:12px;opacity:.6;align-self:center">本组已选 ' + nSel + '</span>' +
+          '</div>' +
+          '<input type="text" class="ksearch" placeholder="搜索模型…" data-act="query" data-i="' + i + '" value="' + esc(d.query || '') + '">' +
+          '<div class="kmodels">' + opts + '</div>' +
+          '<div class="kaddrow">' +
+            '<input type="text" placeholder="手动添加模型名（如 deepseek-v4.1-flash）" data-act="addmodel-input" data-i="' + i + '">' +
+            '<button type="button" class="mini" data-act="addmodel" data-i="' + i + '">添加</button>' +
+          '</div>' +
+        '</div>';
+    }).join('');
+  }
+
+  /* 事件委托：避免每次 render 都重新绑定（render 会整块替换 innerHTML）。 */
+  function bind() {
+    const list = $('keyList');
+    if (!list || list._bound) return;
+    list._bound = true;
+    list.addEventListener('click', async ev => {
+      const el = ev.target.closest('[data-act]');
+      if (!el) return;
+      const i = +el.dataset.i;
+      const d = drafts[i];
+      if (!d) return;
+      const act = el.dataset.act;
+      if (act === 'del') {
+        if (!confirm('删除该密钥？使用它的客户端将立即失效。')) return;
+        drafts.splice(i, 1);
+        render();
+      } else if (act === 'gen') {
+        d.key = genKey();
+        render();
+      } else if (act === 'tab') {
+        d.tab = el.dataset.v;
+        d.query = '';
+        render();
+      } else if (act === 'addmodel') {
+        addModelFromInput(i);
+      }
+    });
+    list.addEventListener('keydown', ev => {
+      if (ev.key !== 'Enter') return;
+      const el = ev.target.closest('[data-act=addmodel-input]');
+      if (!el) return;
+      ev.preventDefault();
+      addModelFromInput(+el.dataset.i);
+    });
+    list.addEventListener('input', ev => {
+      const el = ev.target.closest('[data-act]');
+      if (!el) return;
+      const i = +el.dataset.i;
+      const d = drafts[i];
+      if (!d) return;
+      const act = el.dataset.act;
+      if (act === 'name') d.name = el.value;
+      else if (act === 'key') d.key = el.value.trim();
+      else if (act === 'query') {
+        // 搜索只影响可见项，不重绘整个卡片，否则输入框会失焦。
+        d.query = el.value;
+        const box = el.nextElementSibling;
+        const q = el.value.toLowerCase();
+        const models = (modelCache && modelCache[d.tab]) || [];
+        let any = false;
+        [...box.querySelectorAll('label')].forEach(lb => {
+          const name = lb.querySelector('span').textContent.toLowerCase();
+          const hit = !q || name.includes(q);
+          lb.style.display = hit ? '' : 'none';
+          if (hit) any = true;
+        });
+        return;
+      }
+    });
+    list.addEventListener('change', ev => {
+      const el = ev.target.closest('input[data-act=model]');
+      if (!el) return;
+      const d = drafts[+el.dataset.i];
+      if (!d) return;
+      if (el.checked) d.allow.add(el.value);
+      else d.allow.delete(el.value);
+      // 只更新计数，不整块重绘（保留滚动位置与勾选焦点）。
+      const card = el.closest('.keycard');
+      if (card) {
+        card.querySelector('.klabel span').textContent = '已选 ' + d.allow.size + ' 个';
+        const nSel = [...d.allow].filter(a => a.startsWith(d.tab + ':')).length;
+        const tabCnt = card.querySelector('.ktabs span span');
+        if (tabCnt) tabCnt.textContent = '本组已选 ' + nSel + ' 个';
+      }
+    });
+  }
+
+  /* 用 config.json 的 keys 重置草稿（进入配置页时调用）。 */
+  function load(keys) {
+    drafts = (keys || []).map(k => ({
+      key: k.key || '',
+      name: k.name || '',
+      allow: new Set(parseAllow(k.allow)),
+      tab: 'cn',
+      query: '',
+    }));
+    ensureModels().then(render);
+    render(); // 先渲染骨架，模型到位后再补
+  }
+
+  /* 收集为可提交的 keys[]。空 key 条目丢弃（用户加了卡没填）。 */
+  function collect() {
+    return drafts
+      .filter(d => d.key.trim())
+      .map(d => {
+        const o = { key: d.key.trim() };
+        if (d.name.trim()) o.name = d.name.trim();
+        if (d.allow.size) o.allow = [...d.allow];
+        return o;
+      });
+  }
+
+  bind();
+  if ($('btnKeyAdd')) {
+    $('btnKeyAdd').onclick = e => {
+      e.preventDefault();
+      drafts.push({ key: genKey(), name: '', allow: new Set(), tab: 'cn', query: '' });
+      render();
+    };
+  }
+  // 「⚡ 加载所有账号模型」：汇总全部账号（不去重），刷新两侧列表。
+  if ($('btnKeyLoadAll')) {
+    $('btnKeyLoadAll').onclick = async e => {
+      e.preventDefault();
+      if (loading) return;
+      loading = true;
+      const btn = $('btnKeyLoadAll');
+      const old = btn.textContent;
+      btn.textContent = '加载中…';
+      btn.disabled = true;
+      try {
+        modelCache = null;      // 强制重新拉取
+        await ensureModels(true);
+        // 顺手把当前卡片里搜索框的过滤重置，让新增项可见。
+        drafts.forEach(d => { d.query = ''; });
+        render();
+      } finally {
+        loading = false;
+        btn.textContent = old;
+        btn.disabled = false;
+      }
+    };
+  }
+
+  return { load, collect, render };
+})();

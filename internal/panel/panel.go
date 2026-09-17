@@ -292,6 +292,13 @@ func (p *Panel) logsHandler(w http.ResponseWriter, r *http.Request) {
 // 该端点返回的是**国际版模型目录**（代号形态 default-model/fast-model/…），
 // 面板「模型与档位」会显示与 CN 无关的名单（且随机漂移，时对时错）。
 func (p *Panel) models(w http.ResponseWriter, r *http.Request) {
+	// all=1：汇总**全部账号**的模型目录，按 realm（cn/global）分组、**不去重**
+	// （同名模型在多账号间重复出现属预期，前端按账号来源区分展示）。
+	// 用于面板「一键加载所有账号模型」——解决分 realm 取单个账号时目录缺失的问题。
+	if v := r.URL.Query().Get("all"); v == "1" || v == "true" {
+		p.modelsAll(w)
+		return
+	}
 	// realm 参数可选：默认 cn（面板主视图是国内站）；?realm=global 查国际版目录。
 	realm := r.URL.Query().Get("realm")
 	if realm != "global" {
@@ -309,44 +316,106 @@ func (p *Panel) models(w http.ResponseWriter, r *http.Request) {
 	}
 	out := make([]map[string]any, 0, len(infos))
 	for _, mi := range infos {
-		entry := map[string]any{
-			"id":                   mi.ID,
-			"name":                 mi.Name,
-			"default_effort":       mi.DefaultEffort,
-			"supported_efforts":    mi.Efforts,
-			"can_disable_thinking": mi.CanDisableThinking,
-			"supports_reasoning":   mi.SupportsReasoning,
-			"supports_images":      mi.SupportsImages,
-			"credits":              upstream.NormalizeCredits(mi.Credits),
-			"description":          mi.Description,
-			"tags":                 mi.Tags,
-			"vendor":               mi.Vendor,
-			"is_default":           mi.IsDefault,
-			"supports_tool_call":   mi.SupportsToolCall,
-			"only_reasoning":       mi.OnlyReasoning,
-			"reasoning_effort":     mi.ReasoningEffort,
-			"reasoning_summary":    mi.ReasoningSummary,
-		}
-		if mi.MaxAllowedSize > 0 {
-			entry["max_allowed_size"] = mi.MaxAllowedSize
-		}
-		// 与 /v1/models 同口径：context_length / max_output_tokens 走四级查找链
-		// （上游动态值 → 静态知识表 → model.json → models.dev → 1M 兜底），
-		// effort 档位走 EffortListing（远端权威 ∪ CN 静态兜底表）——面板展示的
-		// 数值即客户端实际拿到的数值，两侧不再漂移。
-		entry["context_length"] = upstream.ContextWindowListingV4(mi.ID, mi.ContextWindow, p.cfg.Upstream.HTTP)
-		if mo, ok := upstream.MaxOutputTokensListingV4(mi.ID, mi.MaxTokens, p.cfg.Upstream.HTTP); ok {
-			entry["max_output_tokens"] = mo
-		}
-		if efforts, def := upstream.EffortListing(realm, mi.ID, mi.Efforts, mi.DefaultEffort); efforts != nil {
-			entry["supported_efforts"] = efforts
-			if def != "" {
-				entry["default_effort"] = def
-			}
-		}
-		out = append(out, entry)
+		out = append(out, p.modelEntry(mi, realm))
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "models": out})
+}
+
+// modelEntry 把单个 ModelInfo 转为面板响应条目（id/name/档位/上下文等）。
+// realm 决定 effort 档位兜底表（cn/global 静态表不同）。
+func (p *Panel) modelEntry(mi upstream.ModelInfo, realm string) map[string]any {
+	entry := map[string]any{
+		"id":                   mi.ID,
+		"name":                 mi.Name,
+		"default_effort":       mi.DefaultEffort,
+		"supported_efforts":    mi.Efforts,
+		"can_disable_thinking": mi.CanDisableThinking,
+		"supports_reasoning":   mi.SupportsReasoning,
+		"supports_images":      mi.SupportsImages,
+		"credits":              upstream.NormalizeCredits(mi.Credits),
+		"description":          mi.Description,
+		"tags":                 mi.Tags,
+		"vendor":               mi.Vendor,
+		"is_default":           mi.IsDefault,
+		"supports_tool_call":   mi.SupportsToolCall,
+		"only_reasoning":       mi.OnlyReasoning,
+		"reasoning_effort":     mi.ReasoningEffort,
+		"reasoning_summary":    mi.ReasoningSummary,
+	}
+	if mi.MaxAllowedSize > 0 {
+		entry["max_allowed_size"] = mi.MaxAllowedSize
+	}
+	// 与 /v1/models 同口径：context_length / max_output_tokens 走四级查找链
+	// （上游动态值 → 静态知识表 → model.json → models.dev → 1M 兜底），
+	// effort 档位走 EffortListing（远端权威 ∪ CN 静态兜底表）——面板展示的
+	// 数值即客户端实际拿到的数值，两侧不再漂移。
+	entry["context_length"] = upstream.ContextWindowListingV4(mi.ID, mi.ContextWindow, p.cfg.Upstream.HTTP)
+	if mo, ok := upstream.MaxOutputTokensListingV4(mi.ID, mi.MaxTokens, p.cfg.Upstream.HTTP); ok {
+		entry["max_output_tokens"] = mo
+	}
+	if efforts, def := upstream.EffortListing(realm, mi.ID, mi.Efforts, mi.DefaultEffort); efforts != nil {
+		entry["supported_efforts"] = efforts
+		if def != "" {
+			entry["default_effort"] = def
+		}
+	}
+	return entry
+}
+
+// modelsAll 汇总全部账号的模型目录，按 realm 分两组返回、不去重。
+// flat 为逐条记录（含来源账号），供前端「一键加载所有账号模型」展示；
+// cn / global 为按 realm 分组后的 id 列表（同样不去重，保留重复）。
+// 单个账号拉取失败不致命：记录到 errors 后继续，尽量给出可用清单。
+func (p *Panel) modelsAll(w http.ResponseWriter) {
+	type acctModels struct {
+		uid      string
+		nickname string
+		realm    string
+		ids      []string
+	}
+	var (
+		groups []acctModels
+		cnIDs  []string
+		glIDs  []string
+		errs   []string
+	)
+	for _, st := range p.cfg.Pool.List() {
+		acct := p.cfg.Pool.AuthByUID(st.UID)
+		if acct == nil {
+			continue
+		}
+		realm := acct.Realm()
+		if realm != "global" {
+			realm = "cn"
+		}
+		infos, err := p.cfg.Upstream.FetchModels(acct)
+		if err != nil {
+			errs = append(errs, st.UID+": "+err.Error())
+			continue
+		}
+		g := acctModels{uid: st.UID, nickname: st.Nickname, realm: realm}
+		for _, mi := range infos {
+			// 统一带 realm 前缀，与白名单 allow 的键形态（cn:/global:）一致。
+			id := realm + ":" + mi.ID
+			g.ids = append(g.ids, id)
+			if realm == "global" {
+				glIDs = append(glIDs, id)
+			} else {
+				cnIDs = append(cnIDs, id)
+			}
+		}
+		groups = append(groups, g)
+	}
+	out := map[string]any{
+		"ok":     true,
+		"cn":     cnIDs,
+		"global": glIDs,
+		"groups": groups,
+	}
+	if len(errs) > 0 {
+		out["errors"] = errs
+	}
+	writeJSON(w, http.StatusOK, out)
 }
 
 // modelProbes 返回模型输出上限的探测结果（scripts/probe_max_tokens.py --panel-out
