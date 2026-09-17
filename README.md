@@ -197,7 +197,7 @@ flowchart LR
 
 ```bash
 # 1. 克隆
-git clone https://github.com/linguo2625469/workbuddy2api-panel.git
+git clone https://github.com/qiaoba223/workbuddy2api-panel.git
 cd workbuddy2api-panel
 
 # 2. 准备配置（compose 挂载此文件，缺失会导致容器启动失败）
@@ -546,7 +546,7 @@ http://127.0.0.1:7863/panel/
 # 1. config.json 打开开关（密码哈希单独落盘，不写在这个文件里）
 #    "web_auth": { "enabled": true, "users_file": "./data/webusers.json" }
 
-# 2. 创建首个用户（交互式输入密码，不回显）
+# 2. 创建首个用户（交互式输入密码，不回显）—— 也可改用网页初始化，见下方「两种建号方式」
 ./wb2api setpassword admin
 
 #    Docker 部署：
@@ -566,9 +566,42 @@ docker exec -it workbuddy2api /app/wb2api setpassword admin
 ./wb2api setpassword --delete alice      # 删除用户
 ```
 
-**为什么用子命令而不是面板里首次建号**：面板首次建号意味着"谁能第一个访问谁就能拿到面板"，
-公网暴露时是明显风险。用 `setpassword` 需要先有服务器/容器执行权限，等于把引导入口
-收敛到操作系统层鉴权（和 SSH 同一信任级）。
+**两种建号方式**
+
+代码同时提供网页初始化与 CLI 两条路径，按部署环境选：
+
+| 方式 | 入口 | 适用 |
+|---|---|---|
+| **CLI**（推荐公网部署） | `./wb2api setpassword <用户名>` | 需要服务器/容器执行权限，引导入口收敛到操作系统层鉴权（与 SSH 同级） |
+| **网页初始化** | 浏览器打开面板 → 自动跳转建号页 | 无 SSH 条件（如自建一键部署、托管平台），输用户名密码即可建首个管理员 |
+
+网页初始化**仅在用户库为空时可用**（`auth/setup` 端点，建完立即永久关闭，再调返回 403）。
+它存在的意义是打破"登录需要账号、建账号需要先登录"的鸡生蛋：部署完直接开浏览器建管理员，
+不必每次重新部署都 `docker exec` 进去敲命令。
+
+> ⚠️ **首次部署顺序很重要（先到先得窗口）**
+>
+> 网页初始化端点是**公开且不受 CSRF 约束**的（此刻还没有会话，前端拿不到 token）。
+> 在"服务已对公网开放、但还没有任何用户"的这段时间里，**任何人**（包括扫描器）
+> 访问 `POST /panel/api/auth/setup` 都能抢先建立管理员账号。
+>
+> **推荐顺序**（把窗口压到接近零）：
+>
+> ```bash
+> # 1. 配好 config.json（含 web_auth.enabled=true）——先别急着对公网开放
+> # 2. 【推荐】直接用 CLI 建号，跳过网页初始化
+> ./wb2api setpassword admin
+> #    或 Docker：
+> docker exec -it workbuddy2api /app/wb2api setpassword admin
+> # 3. 启动服务
+> # 4. 确认能登录后，再开放公网（/ 挂反代）
+> ```
+>
+> 若必须用网页初始化（无 CLI 条件）：
+> **先只绑 `127.0.0.1` 完成建号**，确认用户库已生成（`data/webusers.json` 出现且非空），
+> 再改绑公网地址。**不要**在服务已公开、账号为空的状态下放置不管。
+>
+> 一旦有了用户，该入口自动失效，之后无需担心。
 
 **配置字段**（`config.json` 的 `web_auth` 段）
 
